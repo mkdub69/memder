@@ -1,147 +1,164 @@
 import os
 import random
 import sqlite3
-from flask import Flask, request, render_template_string, redirect, url_for, session, send_file
+from flask import Flask, render_template_string, request, redirect, send_file
 import dropbox
 from io import BytesIO
 
 app = Flask(__name__)
-app.secret_key = 'supergeheime-session-key'
 
-# Dropbox Setup
 DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
 DROPBOX_FOLDER_PATH = "/memder"
+PASSWORD = "6969"
+
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# DB Setup
+# SQLite initialisieren
 conn = sqlite3.connect("votes.db", check_same_thread=False)
 c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS votes (
-    image1 TEXT,
-    image2 TEXT,
-    voted TEXT
-)''')
-c.execute('''CREATE TABLE IF NOT EXISTS flags (
-    image TEXT
-)''')
+c.execute('''
+    CREATE TABLE IF NOT EXISTS votes (
+        meme TEXT,
+        count INTEGER
+    )
+''')
+c.execute('''
+    CREATE TABLE IF NOT EXISTS flagged (
+        meme TEXT PRIMARY KEY
+    )
+''')
 conn.commit()
 
-# Templates
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>memder</title>
-    <style>
-        body { font-family: 'Comic Sans MS', cursive; text-align: center; }
-        .meme-container { display: flex; flex-direction: column; align-items: center; gap: 12px; }
-        .meme { border: 3px solid #000; padding: 5px; max-width: 90vw; }
-        .btn { font-size: 1.2em; padding: 6px 20px; margin-top: 10px; }
-        .smallnote { font-size: 0.7em; margin-top: 20px; color: gray; }
-        .topmemes img { border: 2px solid #000; margin: 10px 0; max-width: 90vw; }
-    </style>
-</head>
-<body>
-    {% if not session.get('authenticated') %}
-        <h2>Zugang nur für echte Meme-Connaisseurs</h2>
-        <form method="POST">
-            <input type="password" name="password" autofocus placeholder="Passwort">
-            <button type="submit">Los!</button>
-        </form>
-    {% else %}
-        {% if meme1 and meme2 %}
-            <h3>Welches Meme ist geiler?</h3>
-            <div class="meme-container">
-                <form method="POST">
-                    <input type="hidden" name="image1" value="{{ meme1 }}">
-                    <input type="hidden" name="image2" value="{{ meme2 }}">
-                    <button name="vote" value="{{ meme1 }}"><img class="meme" src="{{ url_for('get_image', path=meme1) }}"></button>
-                    <button name="vote" value="{{ meme2 }}"><img class="meme" src="{{ url_for('get_image', path=meme2) }}"></button>
-                </form>
-                <form method="POST" style="margin-top: 10px;">
-                    <input type="hidden" name="flag1" value="{{ meme1 }}">
-                    <input type="hidden" name="flag2" value="{{ meme2 }}">
-                    <button name="flag" value="yes">Beide Memes melden 🚩</button>
-                </form>
-            </div>
-        {% endif %}
-        <a href="{{ url_for('leaderboard') }}">🔥 Zeig mir die besten Memes!</a>
-        <div class="smallnote">Bilder stammen aus den Monaten Januar – Juni 2010</div>
-    {% endif %}
-</body>
-</html>
-"""
-
-LEADERBOARD_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Top Memes</title>
-    <style>
-        body { font-family: 'Comic Sans MS', cursive; text-align: center; }
-        .topmemes img { border: 3px solid #000; margin: 10px 0; max-width: 90vw; }
-        .smallnote { font-size: 0.7em; margin-top: 20px; color: gray; }
-    </style>
-</head>
-<body>
-    <h2>🔥 Die besten Memes 🔥</h2>
-    <div class="topmemes">
-        {% for meme in memes %}
-            <img src="{{ url_for('get_image', path=meme) }}">
-        {% endfor %}
-    </div>
-    <a href="{{ url_for('index') }}">Zurück</a>
-    <div class="smallnote">Bilder stammen aus den Monaten Januar – Juni 2010</div>
-</body>
-</html>
-"""
-
-# Funktionen
+# Bilder aus Dropbox holen
 def list_images():
-    flagged = set(r[0] for r in c.execute("SELECT image FROM flags"))
     entries = dbx.files_list_folder(DROPBOX_FOLDER_PATH).entries
-    images = [e.path_display for e in entries if isinstance(e, dropbox.files.FileMetadata)]
-    return [img for img in images if img not in flagged]
+    return [entry.path_display for entry in entries if isinstance(entry, dropbox.files.FileMetadata)]
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    if not session.get('authenticated'):
-        if request.method == "POST" and request.form.get("password") == "6969":
-            session['authenticated'] = True
-            return redirect(url_for('index'))
-        return render_template_string(HTML_TEMPLATE, meme1=None, meme2=None)
-
-    if request.method == "POST":
-        if 'vote' in request.form:
-            c.execute("INSERT INTO votes VALUES (?, ?, ?)", (
-                request.form["image1"],
-                request.form["image2"],
-                request.form["vote"]
-            ))
-            conn.commit()
-        elif 'flag' in request.form:
-            c.execute("INSERT INTO flags VALUES (?)", (request.form["flag1"],))
-            c.execute("INSERT INTO flags VALUES (?)", (request.form["flag2"],))
-            conn.commit()
-        return redirect(url_for("index"))
-
-    images = list_images()
+# Zwei zufällige, nicht-geflaggte Bilder auswählen
+def get_two_random_images():
+    images = [img for img in list_images() if not is_flagged(img)]
     if len(images) < 2:
-        return "Zu wenige Memes verfügbar."
-    meme1, meme2 = random.sample(images, 2)
-    return render_template_string(HTML_TEMPLATE, meme1=meme1, meme2=meme2)
+        return None, None
+    return random.sample(images, 2)
 
-@app.route("/leaderboard")
-def leaderboard():
-    res = c.execute("SELECT voted, COUNT(*) as votes FROM votes GROUP BY voted ORDER BY votes DESC LIMIT 10")
-    memes = [row[0] for row in res.fetchall()]
-    return render_template_string(LEADERBOARD_TEMPLATE, memes=memes)
+# Bild flaggen
+def flag_image(path):
+    c.execute("INSERT OR IGNORE INTO flagged (meme) VALUES (?)", (path,))
+    conn.commit()
 
+def is_flagged(path):
+    c.execute("SELECT 1 FROM flagged WHERE meme = ?", (path,))
+    return c.fetchone() is not None
+
+# Votings speichern
+def vote_for(image_path):
+    c.execute("INSERT INTO votes (meme, count) VALUES (?, 1) ON CONFLICT(meme) DO UPDATE SET count = count + 1", (image_path,))
+    conn.commit()
+
+# Top-Votings holen
+def get_top_voted(limit=10):
+    c.execute("SELECT meme, count FROM votes ORDER BY count DESC LIMIT ?", (limit,))
+    return c.fetchall()
+
+# Bild von Dropbox serven
 @app.route("/image")
-def get_image():
+def serve_image():
     path = request.args.get("path")
     metadata, res = dbx.files_download(path)
-    return send_file(BytesIO(res.content), mimetype='image/jpeg')
+    return send_file(BytesIO(res.content), mimetype="image/jpeg")
+
+# Passwort-Check
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST" and request.form.get("pw") != PASSWORD:
+        return render_template_string('<p>Falsches Passwort. <a href="/">Zurück</a></p>')
+    if request.method == "POST":
+        return redirect("/vote")
+
+    return render_template_string('''
+        <form method="POST" style="text-align:center; font-family: Comic Sans MS;">
+            <h3>🔒 Passwort bitte:</h3>
+            <input type="password" name="pw">
+            <button type="submit">Los geht's</button>
+        </form>
+    ''')
+
+# Haupt-Votingseite
+@app.route("/vote", methods=["GET", "POST"])
+def vote():
+    if request.method == "POST":
+        if "winner" in request.form:
+            vote_for(request.form["winner"])
+        elif "flag1" in request.form:
+            flag_image(request.form["flag1"])
+        elif "flag2" in request.form:
+            flag_image(request.form["flag2"])
+        return redirect("/vote")
+
+    img1, img2 = get_two_random_images()
+    if not img1 or not img2:
+        return "<p>Zu wenig ungemeldete Memes übrig.</p>"
+
+    return render_template_string('''
+        <html>
+        <head>
+            <title>Welches Meme ist geiler?</title>
+            <style>
+                body { font-family: "Comic Sans MS"; text-align: center; }
+                img { width: 90%%; max-width: 300px; margin: 10px; border: 4px solid black; }
+                .meme-container { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+                form { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+                .row { display: flex; justify-content: space-around; flex-wrap: wrap; }
+            </style>
+        </head>
+        <body>
+            <h3>Welches Meme ist geiler?</h3>
+            <form method="POST">
+                <div class="row">
+                    <div class="meme-container">
+                        <button type="submit" name="winner" value="{{ img1 }}">😂</button>
+                        <img src="/image?path={{ img1 }}" alt="Meme 1">
+                        <button type="submit" name="flag1" value="{{ img1 }}">🛑 Melden</button>
+                    </div>
+                    <div class="meme-container">
+                        <button type="submit" name="winner" value="{{ img2 }}">😂</button>
+                        <img src="/image?path={{ img2 }}" alt="Meme 2">
+                        <button type="submit" name="flag2" value="{{ img2 }}">🛑 Melden</button>
+                    </div>
+                </div>
+            </form>
+            <a href="/leaderboard">🏆 Zur Bestenliste</a>
+            <p style="font-size: small; margin-top: 20px;">Zeitraum: Januar – Juni 2010</p>
+        </body>
+        </html>
+    ''', img1=img1, img2=img2)
+
+# Bestenliste anzeigen
+@app.route("/leaderboard")
+def leaderboard():
+    top_memes = get_top_voted()
+    return render_template_string('''
+        <html>
+        <head>
+            <title>Top Memes</title>
+            <style>
+                body { font-family: "Comic Sans MS"; text-align: center; }
+                img { width: 90%%; max-width: 300px; margin: 10px; border: 4px solid black; }
+            </style>
+        </head>
+        <body>
+            <h2>🏆 Die 10 geilsten Memes</h2>
+            {% for meme, count in memes %}
+                <div>
+                    <img src="/image?path={{ meme }}" alt="Top Meme">
+                    <p>Votes: {{ count }}</p>
+                </div>
+            {% endfor %}
+            <a href="/vote">🔙 Zurück zum Voting</a>
+            <p style="font-size: small; margin-top: 20px;">Zeitraum: Januar – Juni 2010</p>
+        </body>
+        </html>
+    ''', memes=top_memes)
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=10000)
+    app.run(debug=True)
