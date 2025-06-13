@@ -1,177 +1,153 @@
 import os
 import random
 import sqlite3
-from flask import Flask, render_template_string, request, redirect, url_for, session
+from flask import Flask, render_template_string, request, redirect, send_file, session
 import dropbox
-from urllib.parse import quote
+from io import BytesIO
 
 app = Flask(__name__)
-app.secret_key = 'super_secret_key'
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecretkey")
+DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+DROPBOX_FOLDER_PATH = "/memder"
 
-DROPBOX_ACCESS_TOKEN = os.getenv('DROPBOX_ACCESS_TOKEN')
-DROPBOX_FOLDER_PATH = '/memder'
-DATABASE = 'votes.db'
-PASSWORD = '6969'
-
+# Initialisiere Dropbox
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# Template
-HTML = '''
-<!doctype html>
-<html lang="de">
+# Datenbank initialisieren
+conn = sqlite3.connect("votes.db", check_same_thread=False)
+c = conn.cursor()
+c.execute('''
+    CREATE TABLE IF NOT EXISTS votes (
+        image TEXT,
+        count INTEGER DEFAULT 0
+    )
+''')
+c.execute('''
+    CREATE TABLE IF NOT EXISTS flagged (
+        image TEXT PRIMARY KEY
+    )
+''')
+conn.commit()
+
+# Templates
+TEMPLATE = '''
+<!DOCTYPE html>
+<html>
 <head>
-    <meta charset="utf-8">
-    <title>Memder Voting</title>
+    <title>Welches Meme ist geiler?</title>
     <style>
-        body {
-            font-family: "Comic Sans MS", cursive, sans-serif;
-            text-align: center;
-            background: #fff;
-            margin: 0;
-            padding: 0;
-        }
-        h2 {
-            font-size: 1.2em;
-            margin-top: 20px;
-        }
-        .meme-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 10px;
-            padding: 10px;
-        }
-        .meme {
-            border: 2px solid #ccc;
-            padding: 5px;
-            max-width: 95vw;
-        }
-        .btn-row {
-            margin-top: 10px;
-        }
-        .small {
-            font-size: 0.7em;
-            margin-top: 20px;
-            color: gray;
-        }
-        a {
-            font-size: 0.9em;
-        }
-        form {
-            margin: 0;
-        }
+        body { font-family: "Comic Sans MS", cursive, sans-serif; text-align: center; }
+        .meme-container { display: flex; justify-content: center; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
+        .meme { border: 2px solid black; padding: 10px; }
+        .meme img { max-width: 100%; height: auto; }
+        .footer { font-size: 0.8em; margin-top: 30px; color: #666; }
     </style>
 </head>
 <body>
-    {% if not session.get('authenticated') %}
-        <h2>Passwort eingeben</h2>
-        <form method="post" action="{{ url_for('login') }}">
-            <input type="password" name="password">
-            <input type="submit" value="Los">
+    {% if not session.get("authenticated") %}
+        <h2>Passwort erforderlich</h2>
+        <form method="post" action="/login">
+            <input type="password" name="password" />
+            <input type="submit" value="Einloggen" />
         </form>
     {% else %}
-        <h2>Welches Meme ist geiler?</h2>
+        <h2 style="font-size: 1.5em;">Welches Meme ist geiler?</h2>
         <div class="meme-container">
-            <form method="post">
-                <div><img class="meme" src="{{ url_for('serve_image', path=left_path) }}"></div>
-                <div class="btn-row">
-                    <button name="vote" value="{{ left_path }}">Linkes Meme ist geiler</button>
-                    <button name="flag" value="{{ left_path }}">Meme melden</button>
-                </div>
-            </form>
-
-            <form method="post">
-                <div><img class="meme" src="{{ url_for('serve_image', path=right_path) }}"></div>
-                <div class="btn-row">
-                    <button name="vote" value="{{ right_path }}">Rechtes Meme ist geiler</button>
-                    <button name="flag" value="{{ right_path }}">Meme melden</button>
-                </div>
-            </form>
+            {% for path in images %}
+            <div class="meme">
+                <img src="/image?path={{ path }}" alt="Meme" /><br>
+                <form method="post" action="/vote">
+                    <input type="hidden" name="vote" value="{{ path }}">
+                    <button type="submit">Wählen</button>
+                </form>
+                <form method="post" action="/flag" style="margin-top: 5px;">
+                    <input type="hidden" name="flag" value="{{ path }}">
+                    <button type="submit">Melden</button>
+                </form>
+            </div>
+            {% endfor %}
         </div>
-        <a href="{{ url_for('leaderboard') }}">🔥 Beste Memes anzeigen</a>
-        <div class="small">Meme-Zeitraum: Januar – Juni 2010</div>
+        <p><a href="/leaderboard">Top Memes anzeigen</a></p>
+        <div class="footer">Bewertete Monate: Januar – Juni 2010</div>
     {% endif %}
 </body>
 </html>
 '''
 
-# Helper
-def init_db():
-    with sqlite3.connect(DATABASE) as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS votes (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        image TEXT,
-                        count INTEGER DEFAULT 1
-                    )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS flagged (
-                        image TEXT PRIMARY KEY
-                    )''')
-        conn.commit()
+LEADERBOARD_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Top Memes</title>
+    <style>
+        body { font-family: "Comic Sans MS", cursive, sans-serif; text-align: center; }
+        img { max-width: 90%%; margin: 10px auto; display: block; border: 2px solid black; }
+        .footer { font-size: 0.8em; margin-top: 30px; color: #666; }
+    </style>
+</head>
+<body>
+    <h2>Top Memes</h2>
+    {% for path in images %}
+        <img src="/image?path={{ path }}" alt="Meme">
+    {% endfor %}
+    <p><a href="/">Zurück zur Bewertung</a></p>
+    <div class="footer">Bewertete Monate: Januar – Juni 2010</div>
+</body>
+</html>
+'''
 
+# Funktionen
 def list_images():
     try:
-        entries = dbx.files_list_folder(DROPBOX_FOLDER_PATH).entries
-        with sqlite3.connect(DATABASE) as conn:
-            flagged = {row[0] for row in conn.execute("SELECT image FROM flagged")}
-        return [e.path_lower for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.path_lower not in flagged]
+        flagged = {row[0] for row in c.execute("SELECT image FROM flagged")}
+        entries = dbx.files_list_folder(DROPBOX_FOLDER_PATH, recursive=True).entries
+        images = [entry.path_display for entry in entries if isinstance(entry, dropbox.files.FileMetadata)]
+        images = [img for img in images if img not in flagged]
+        return images
     except Exception as e:
-        print("Fehler beim Abrufen von Bildern:", e)
+        print("Fehler beim Laden der Bilder:", e)
         return []
 
-@app.route('/', methods=['GET', 'POST'])
+@app.route("/", methods=["GET"])
 def index():
-    if not session.get('authenticated'):
-        return render_template_string(HTML)
-
-    if request.method == 'POST':
-        if 'vote' in request.form:
-            voted = request.form['vote']
-            with sqlite3.connect(DATABASE) as conn:
-                c = conn.cursor()
-                c.execute("INSERT INTO votes (image, count) VALUES (?, 1) ON CONFLICT(image) DO UPDATE SET count = count + 1", (voted,))
-                conn.commit()
-        elif 'flag' in request.form:
-            flagged = request.form['flag']
-            with sqlite3.connect(DATABASE) as conn:
-                c = conn.cursor()
-                c.execute("INSERT OR IGNORE INTO flagged (image) VALUES (?)", (flagged,))
-                conn.commit()
-        return redirect(url_for('index'))
-
+    if not session.get("authenticated"):
+        return render_template_string(TEMPLATE, images=[], session=session)
     images = list_images()
     if len(images) < 2:
-        return "<h2>Zu wenige Memes verfügbar.</h2>"
+        return "<h2>Zu wenig ungemeldete Memes übrig :(</h2>"
+    return render_template_string(TEMPLATE, images=random.sample(images, 2), session=session)
 
-    left, right = random.sample(images, 2)
-    return render_template_string(HTML, left_path=left, right_path=right)
+@app.route("/vote", methods=["POST"])
+def vote():
+    image = request.form["vote"]
+    c.execute("INSERT INTO votes (image, count) VALUES (?, 1) ON CONFLICT(image) DO UPDATE SET count = count + 1", (image,))
+    conn.commit()
+    return redirect("/")
 
-@app.route('/login', methods=['POST'])
-def login():
-    if request.form.get('password') == PASSWORD:
-        session['authenticated'] = True
-    return redirect(url_for('index'))
+@app.route("/flag", methods=["POST"])
+def flag():
+    image = request.form["flag"]
+    c.execute("INSERT OR IGNORE INTO flagged (image) VALUES (?)", (image,))
+    conn.commit()
+    return redirect("/")
 
-@app.route('/leaderboard')
-def leaderboard():
-    with sqlite3.connect(DATABASE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT image, count FROM votes ORDER BY count DESC LIMIT 10")
-        rows = c.fetchall()
-    html = '<h2>🔥 Beste Memes</h2><div style="font-family:Comic Sans MS">'
-    for row in rows:
-        html += f'<div style="margin-bottom:20px;"><img style="max-width:95vw;border:2px solid #ccc;" src="/image?path={quote(row[0])}"><br>Votes: {row[1]}</div>'
-    html += '<br><a href="/">Zurück zur Auswahl</a>'
-    html += '<div class="small">Meme-Zeitraum: Januar – Juni 2010</div>'
-    html += '</div>'
-    return html
-
-@app.route('/image')
-def serve_image():
-    path = request.args.get('path')
+@app.route("/image")
+def image():
+    path = request.args.get("path")
     _, res = dbx.files_download(path)
-    return res.content, 200, {'Content-Type': 'image/jpeg'}
+    return send_file(BytesIO(res.content), mimetype="image/jpeg")
 
-if __name__ == '__main__':
-    init_db()
+@app.route("/leaderboard")
+def leaderboard():
+    rows = c.execute("SELECT image FROM votes WHERE image NOT IN (SELECT image FROM flagged) ORDER BY count DESC LIMIT 10").fetchall()
+    images = [row[0] for row in rows]
+    return render_template_string(LEADERBOARD_TEMPLATE, images=images)
+
+@app.route("/login", methods=["POST"])
+def login():
+    if request.form.get("password") == "6969":
+        session["authenticated"] = True
+    return redirect("/")
+
+if __name__ == "__main__":
     app.run(debug=True)
