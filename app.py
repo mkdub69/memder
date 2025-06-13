@@ -1,185 +1,162 @@
 import os
 import random
 import sqlite3
-from flask import Flask, render_template_string, request, redirect, url_for, send_file
+from flask import Flask, request, redirect, url_for, render_template_string, send_file
 import dropbox
 from io import BytesIO
 
-app = Flask(__name__)
-
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+# Konfiguration
+DROPBOX_ACCESS_TOKEN = os.environ.get('DROPBOX_ACCESS_TOKEN')
 DROPBOX_FOLDER_PATH = "/memder"
 
+app = Flask(__name__)
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# DB setup
-DB_PATH = "votes.db"
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS votes (
-                image TEXT,
-                score INTEGER DEFAULT 0
-            )''')
-c.execute('''CREATE TABLE IF NOT EXISTS flagged (
-                image TEXT
-            )''')
-conn.commit()
+# SQLite DB vorbereiten
+def init_db():
+    conn = sqlite3.connect("votes.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS votes (
+        meme TEXT,
+        votes INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS flagged (
+        meme TEXT PRIMARY KEY
+    )''')
+    conn.commit()
+    conn.close()
 
-# list images excluding flagged
-def list_images():
-    entries = dbx.files_list_folder(DROPBOX_FOLDER_PATH).entries
-    images = [entry.path_lower for entry in entries if isinstance(entry, dropbox.files.FileMetadata)]
-    c.execute("SELECT image FROM flagged")
-    flagged = {row[0] for row in c.fetchall()}
-    return [img for img in images if img not in flagged]
+# Nur ungemeldete Bilder abrufen
+def list_memes():
+    result = dbx.files_list_folder(DROPBOX_FOLDER_PATH)
+    all_files = [entry.path_display for entry in result.entries if isinstance(entry, dropbox.files.FileMetadata)]
+    flagged = get_flagged()
+    return [f for f in all_files if f not in flagged]
 
-# serve image from dropbox
-@app.route('/image')
-def image():
-    path = request.args.get('path')
-    metadata, res = dbx.files_download(path)
-    return send_file(BytesIO(res.content), mimetype='image/jpeg')
+def get_flagged():
+    conn = sqlite3.connect("votes.db")
+    c = conn.cursor()
+    c.execute("SELECT meme FROM flagged")
+    flagged = [row[0] for row in c.fetchall()]
+    conn.close()
+    return flagged
 
-# main page
-@app.route('/')
+# Zwei zufällige Memes auswählen
+def get_two_memes():
+    memes = list_memes()
+    if len(memes) < 2:
+        return None, None
+    return random.sample(memes, 2)
+
+@app.route("/")
 def index():
-    images = list_images()
-    if len(images) < 2:
-        return "Nicht genug Memes zum Anzeigen."
-    pair = random.sample(images, 2)
-    return render_template_string(TEMPLATE, image1=pair[0], image2=pair[1])
+    meme1, meme2 = get_two_memes()
+    if not meme1 or not meme2:
+        return "Zu wenige Memes verfügbar."
+    return render_template_string(TEMPLATE, meme1=meme1, meme2=meme2)
 
-# voting
-@app.route('/vote', methods=['POST'])
+@app.route("/vote", methods=["POST"])
 def vote():
-    image = request.form['image']
-    c.execute("INSERT INTO votes (image, score) VALUES (?, 1) ON CONFLICT(image) DO UPDATE SET score = score + 1", (image,))
+    voted_meme = request.form["meme"]
+    conn = sqlite3.connect("votes.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO votes (meme, votes) VALUES (?, 1) ON CONFLICT(meme) DO UPDATE SET votes = votes + 1", (voted_meme,))
     conn.commit()
-    return redirect(url_for('index'))
+    conn.close()
+    return redirect(url_for("index"))
 
-# flagging
-@app.route('/flag', methods=['POST'])
+@app.route("/flag", methods=["POST"])
 def flag():
-    image = request.form['image']
-    c.execute("INSERT OR IGNORE INTO flagged (image) VALUES (?)", (image,))
+    flagged_meme = request.form["meme"]
+    conn = sqlite3.connect("votes.db")
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO flagged (meme) VALUES (?)", (flagged_meme,))
     conn.commit()
-    return redirect(url_for('index'))
+    conn.close()
+    return redirect(url_for("index"))
 
-# leaderboard
-@app.route('/leaderboard')
+@app.route("/leaderboard")
 def leaderboard():
-    c.execute("SELECT image, score FROM votes ORDER BY score DESC LIMIT 10")
+    conn = sqlite3.connect("votes.db")
+    c = conn.cursor()
+    c.execute("SELECT meme, votes FROM votes ORDER BY votes DESC LIMIT 10")
     results = c.fetchall()
-    return render_template_string(LEADERBOARD_TEMPLATE, results=results)
+    conn.close()
+    return render_template_string(LEADERBOARD_TEMPLATE, leaderboard=results)
+
+@app.route("/image")
+def image():
+    path = request.args.get("path")
+    _, res = dbx.files_download(path)
+    return send_file(BytesIO(res.content), mimetype="image/jpeg")
 
 # HTML Templates
-TEMPLATE = '''
+TEMPLATE = """
 <!doctype html>
 <html>
 <head>
     <title>Memder</title>
     <style>
-        body {
-            font-family: "Comic Sans MS", cursive, sans-serif;
-            text-align: center;
-        }
-        .meme-container {
-            display: flex;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin: 20px;
-        }
-        .meme-box {
-            margin: 10px;
-            border: 2px solid #888;
-            padding: 10px;
-            max-width: 45%;
-        }
-        img {
-            max-width: 100%;
-            height: auto;
-        }
-        button {
-            margin: 5px;
-            padding: 10px;
-        }
-        .footer {
-            font-size: 0.8em;
-            color: gray;
-            margin-top: 20px;
-        }
+        body { font-family: Comic Sans MS, cursive; text-align: center; margin: 10px; }
+        img { max-width: 90%%; border: 3px solid #333; margin: 5px; }
+        form { display: inline-block; margin: 10px; }
+        .small { font-size: 12px; margin-top: 20px; color: #666; }
     </style>
 </head>
 <body>
-    <h2>Welches Meme ist geiler?</h2>
-    <div class="meme-container">
-        <div class="meme-box">
-            <img src="/image?path={{ image1 }}" alt="Meme 1">
-            <form method="post" action="/vote">
-                <input type="hidden" name="image" value="{{ image1 }}">
-                <button type="submit">Wählen</button>
-            </form>
-            <form method="post" action="/flag">
-                <input type="hidden" name="image" value="{{ image1 }}">
-                <button type="submit">Melden</button>
-            </form>
-        </div>
-        <div class="meme-box">
-            <img src="/image?path={{ image2 }}" alt="Meme 2">
-            <form method="post" action="/vote">
-                <input type="hidden" name="image" value="{{ image2 }}">
-                <button type="submit">Wählen</button>
-            </form>
-            <form method="post" action="/flag">
-                <input type="hidden" name="image" value="{{ image2 }}">
-                <button type="submit">Melden</button>
-            </form>
-        </div>
+    <h3>Welches Meme ist geiler?</h3>
+
+    <div>
+        <form action="/vote" method="post">
+            <input type="hidden" name="meme" value="{{ meme1 }}">
+            <button type="submit"><img src="/image?path={{ meme1 }}"></button>
+        </form>
+        <form action="/flag" method="post">
+            <input type="hidden" name="meme" value="{{ meme1 }}">
+            <button type="submit">🚩 melden</button>
+        </form>
     </div>
+
+    <div>
+        <form action="/vote" method="post">
+            <input type="hidden" name="meme" value="{{ meme2 }}">
+            <button type="submit"><img src="/image?path={{ meme2 }}"></button>
+        </form>
+        <form action="/flag" method="post">
+            <input type="hidden" name="meme" value="{{ meme2 }}">
+            <button type="submit">🚩 melden</button>
+        </form>
+    </div>
+
+    <br>
     <a href="/leaderboard">Top 10 Memes anzeigen</a>
-    <div class="footer">Zeitraum: Januar – Juni 2010</div>
+    <div class="small">Memes aus Januar – Juni 2010</div>
 </body>
 </html>
-'''
+"""
 
-LEADERBOARD_TEMPLATE = '''
+LEADERBOARD_TEMPLATE = """
 <!doctype html>
 <html>
 <head>
     <title>Top Memes</title>
     <style>
-        body {
-            font-family: "Comic Sans MS", cursive, sans-serif;
-            text-align: center;
-        }
-        .meme {
-            margin: 20px;
-        }
-        img {
-            max-width: 90%;
-            height: auto;
-            border: 2px solid #888;
-        }
-        .footer {
-            font-size: 0.8em;
-            color: gray;
-            margin-top: 20px;
-        }
+        body { font-family: Comic Sans MS, cursive; text-align: center; margin: 10px; }
+        img { max-width: 90%%; border: 3px solid #333; margin: 10px auto; display: block; }
+        .small { font-size: 12px; margin-top: 20px; color: #666; }
     </style>
 </head>
 <body>
-    <h2>Top 10 Memes</h2>
-    {% for image, score in results %}
-        <div class="meme">
-            <img src="/image?path={{ image }}" alt="Meme">
-            <p>{{ score }} Votes</p>
-        </div>
+    <h3>Top 10 Memes</h3>
+    {% for meme, votes in leaderboard %}
+        <img src="/image?path={{ meme }}">
+        <div>{{ votes }} Votes</div>
     {% endfor %}
-    <a href="/">Zurück zur Auswahl</a>
-    <div class="footer">Zeitraum: Januar – Juni 2010</div>
+    <div class="small">Memes aus Januar – Juni 2010</div>
 </body>
 </html>
-'''
+"""
 
 if __name__ == "__main__":
+    init_db()
     app.run(debug=True)
