@@ -65,6 +65,13 @@ def serve_image():
     metadata, res = dbx.files_download(path)
     return send_file(BytesIO(res.content), mimetype="image/jpeg")
 
+@app.route("/test")
+def test():
+    return render_template("test.html", name="Martin")
+
+
+
 if __name__ == "__main__":
     init_db()
     app.run(debug=True, host="0.0.0.0", port=10000)
+
