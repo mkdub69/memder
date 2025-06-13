@@ -11,15 +11,7 @@
             margin: 0;
             padding: 10px;
             background-color: #f0f0f0;
-.meme {
-    border: 4px solid transparent;
-    border-radius: 10px;
-    width: 45%;
-    height: auto;
-    max-height: 70vh;
-    object-fit: contain;
-    cursor: pointer;
-}        }
+        }
         h1 {
             font-size: 1.2em;
             margin: 10px 0;
@@ -29,12 +21,15 @@
             justify-content: center;
             gap: 10px;
             margin-bottom: 20px;
+            flex-wrap: wrap;
         }
         .meme {
             border: 4px solid transparent;
             border-radius: 10px;
-            width: 45%;
+            max-width: 45vw;
+            height: auto;
             cursor: pointer;
+            object-fit: contain;
         }
         .meme.selected {
             border-color: #4CAF50;
@@ -72,7 +67,7 @@
             <img src="/image?path={{ meme1 }}" class="meme" data-path="{{ meme1 }}" onclick="selectMeme(this)">
             <img src="/image?path={{ meme2 }}" class="meme" data-path="{{ meme2 }}" onclick="selectMeme(this)">
         </div>
-        <input type="hidden" name="selected" id="selectedImage">
+        <input type="hidden" name="selected_image" id="selectedImage">
         <input type="hidden" name="meme1" value="{{ meme1 }}">
         <input type="hidden" name="meme2" value="{{ meme2 }}">
         <div class="actions">
