@@ -1,83 +1,79 @@
 import os
 import random
 import sqlite3
-from flask import Flask, render_template, request, redirect, url_for, send_file
+from flask import Flask, request, redirect, url_for, send_file, render_template
 import dropbox
 from io import BytesIO
 
-# Dropbox-Konfiguration
-DROPBOX_TOKEN = os.environ.get("DROPBOX_TOKEN")
-DROPBOX_FOLDER_PATH = "/memder"
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-
-# Flask-App
 app = Flask(__name__)
 
-# Datenbank initialisieren
-def init_db():
-    with sqlite3.connect("votes.db") as conn:
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS votes (
-                image TEXT PRIMARY KEY,
-                count INTEGER DEFAULT 0
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS flagged (
-                image TEXT PRIMARY KEY
-            )
-        ''')
-        conn.commit()
+# Dropbox-Konfiguration über Umgebungsvariable (Render)
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+DROPBOX_FOLDER_PATH = "/memder"
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-init_db()
+# SQLite-Datenbank vorbereiten
+conn = sqlite3.connect('votes.db', check_same_thread=False)
+c = conn.cursor()
+c.execute("""
+CREATE TABLE IF NOT EXISTS votes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_path TEXT UNIQUE,
+    vote_count INTEGER DEFAULT 0,
+    flagged INTEGER DEFAULT 0
+)
+""")
+conn.commit()
 
-# Bilder aus Dropbox abrufen (nur nicht-geflaggte)
+def is_flagged(path):
+    c.execute("SELECT flagged FROM votes WHERE image_path = ?", (path,))
+    result = c.fetchone()
+    return result and result[0] == 1
+
 def list_images():
-    entries = dbx.files_list_folder(DROPBOX_FOLDER_PATH).entries
-    with sqlite3.connect("votes.db") as conn:
-        c = conn.cursor()
-        c.execute("SELECT image FROM flagged")
-        flagged = {row[0] for row in c.fetchall()}
-    images = [e.path_lower for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.path_lower not in flagged]
-    return images
+    try:
+        entries = dbx.files_list_folder(DROPBOX_FOLDER_PATH).entries
+        return [e.path_display for e in entries
+                if isinstance(e, dropbox.files.FileMetadata)
+                and not is_flagged(e.path_display)]
+    except Exception as e:
+        print("Fehler beim Laden der Bilder:", e)
+        return []
 
-# Hauptseite
-@app.route("/", methods=["GET", "POST"])
+@app.route("/")
 def index():
-    if request.method == "POST":
-        selected = request.form["action"]
-        if selected.startswith("/"):
-            if "vote" in request.form["action"]:
-                with sqlite3.connect("votes.db") as conn:
-                    c = conn.cursor()
-                    c.execute("INSERT INTO votes (image, count) VALUES (?, 1) ON CONFLICT(image) DO UPDATE SET count = count + 1", (selected,))
-                    conn.commit()
-            elif "flag" in request.form["action"]:
-                with sqlite3.connect("votes.db") as conn:
-                    c = conn.cursor()
-                    c.execute("INSERT OR IGNORE INTO flagged (image) VALUES (?)", (selected,))
-                    conn.commit()
-        return redirect(url_for("index"))
-
     images = list_images()
     if len(images) < 2:
-        return "Nicht genügend ungeflaggte Memes verfügbar."
+        return "Nicht genug Memes zum Anzeigen"
     img1, img2 = random.sample(images, 2)
     return render_template("index.html", img1=img1, img2=img2)
 
-# Bild aus Dropbox anzeigen
+@app.route("/vote", methods=["POST"])
+def vote():
+    selected_image = request.form["selected_image"]
+    action = request.form["action"]
+
+    if action == "vote":
+        c.execute("INSERT OR IGNORE INTO votes (image_path, vote_count, flagged) VALUES (?, 0, 0)", (selected_image,))
+        c.execute("UPDATE votes SET vote_count = vote_count + 1 WHERE image_path = ?", (selected_image,))
+    elif action == "flag":
+        c.execute("INSERT OR IGNORE INTO votes (image_path, vote_count, flagged) VALUES (?, 0, 0)", (selected_image,))
+        c.execute("UPDATE votes SET flagged = 1 WHERE image_path = ?", (selected_image,))
+    
+    conn.commit()
+    return redirect(url_for("index"))
+
 @app.route("/image")
-def get_image():
+def image():
     path = request.args.get("path")
-    metadata, res = dbx.files_download(path)
+    _, res = dbx.files_download(path)
     return send_file(BytesIO(res.content), mimetype="image/jpeg")
 
-# Bestenliste
 @app.route("/leaderboard")
 def leaderboard():
-    with sqlite3.connect("votes.db") as conn:
-        c = conn.cursor()
-        c.execute("SELECT image, count FROM votes ORDER BY count DESC LIMIT 10")
-        top_images = c.fetchall()
-    return render_template("leaderboard.html", images=top_images)
+    c.execute("SELECT image_path, vote_count FROM votes WHERE flagged = 0 ORDER BY vote_count DESC LIMIT 50")
+    images = c.fetchall()
+    return render_template("leaderboard.html", images=images)
+
+if __name__ == "__main__":
+    app.run(debug=True)
